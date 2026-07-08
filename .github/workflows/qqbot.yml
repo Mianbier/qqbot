@@ -1,0 +1,40 @@
+name: QQ Bot (24/7 Runner)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # 每6小时触发
+  workflow_dispatch:          # 手动触发
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350      # 5小时50分钟（接近6小时上限）
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install aiohttp playwright
+          playwright install --with-deps chromium
+
+      - name: Create .env
+        run: |
+          cat > .env << 'EOF'
+          BOT_APP_ID=${{ secrets.BOT_APP_ID }}
+          BOT_SECRET=${{ secrets.BOT_SECRET }}
+          DS_PHONE=${{ secrets.DS_PHONE }}
+          DS_PASSWORD=${{ secrets.DS_PASSWORD }}
+          OWNER_OPENID=${{ secrets.OWNER_OPENID }}
+          DATA_DIR=./data
+          EOF
+
+      - name: Run QQ Bot
+        run: |
+          mkdir -p data
+          echo "${{ secrets.GROUP_ID }}" > data/group_id.txt
+          timeout 21000 python3.11 qqbot.py
