@@ -661,7 +661,50 @@ async def generate_random_fun():
         _log.error("生成趣味消息失败: %s", e)
         return "🤖 今天没什么想说的~"
 
-# ---------- 其他功能函数 ----------
+# ---------- 消息发送辅助 ----------
+async def send_long_msg(api_type, target_id, msg, max_len=1500):
+    """自动分段发送长消息"""
+    if not msg: return
+    msg = msg.strip()
+    if len(msg) <= max_len:
+        if api_type == "users":
+            await api_post(f"/v2/users/{target_id}/messages", {"content":msg,"msg_id":""})
+        elif api_type == "groups":
+            await api_post(f"/v2/groups/{target_id}/messages", {"content":msg,"msg_id":""})
+        elif api_type == "channels":
+            await api_post(f"/channels/{target_id}/messages", {"content":msg,"msg_id":""})
+        return
+    
+    # 智能分段：优先在换行处分割
+    parts = []
+    current = ""
+    for line in msg.split('\n'):
+        if len(current) + len(line) + 1 <= max_len:
+            current += ('\n' if current else '') + line
+        else:
+            if current:
+                parts.append(current)
+            # 如果单行超长，按字符切
+            current = line
+            while len(current) > max_len:
+                parts.append(current[:max_len])
+                current = current[max_len:]
+    if current:
+        parts.append(current)
+    
+    for i, part in enumerate(parts):
+        prefix = f"({i+1}/{len(parts)})\n" if len(parts) > 1 else ""
+        content = prefix + part
+        try:
+            if api_type == "users":
+                await api_post(f"/v2/users/{target_id}/messages", {"content":content,"msg_id":""})
+            elif api_type == "groups":
+                await api_post(f"/v2/groups/{target_id}/messages", {"content":content,"msg_id":""})
+            elif api_type == "channels":
+                await api_post(f"/channels/{target_id}/messages", {"content":content,"msg_id":""})
+        except: pass
+        if len(parts) > 1:
+            await asyncio.sleep(0.3)
 async def send_ws(ws, op, d):
     global _seq
     payload = {"op":op,"d":d}
@@ -919,7 +962,7 @@ async def handle_dispatch(data):
 
         _log.info("[私聊] %s", c[:60])
         reply = await chat_with_ai(uid, c, name)
-        await api_post(f"/v2/users/{uid}/messages", {"content":reply,"msg_id":mid})
+        await send_long_msg("users", uid, reply)
 
     elif t == "AT_MESSAGE_CREATE":
         uid = d.get("author",{}).get("id","?")
@@ -927,7 +970,7 @@ async def handle_dispatch(data):
         c = d.get("content","").strip()
         cid = d.get("channel_id",""); mid = d.get("id","")
         reply = await chat_with_ai(cid, c, name)
-        await api_post(f"/channels/{cid}/messages", {"content":reply,"msg_id":mid})
+        await send_long_msg("channels", cid, reply)
 
     elif t == "GROUP_AT_MESSAGE_CREATE":
         uid = d.get("author",{}).get("member_openid","?")
@@ -1033,7 +1076,7 @@ async def handle_dispatch(data):
 
         _log.info("[群聊@] %s: %s", name or uid, c[:60])
         reply = await chat_with_ai(conv_id, c, name)
-        await api_post(f"/v2/groups/{gid}/messages", {"content":reply,"msg_id":mid})
+        await send_long_msg("groups", gid, reply)
 
     elif t == "DIRECT_MESSAGE_CREATE":
         uid = d.get("author",{}).get("id","?")

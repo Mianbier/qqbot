@@ -2,28 +2,30 @@ name: QQ Bot (24/7 Runner)
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # 每6小时触发
-  workflow_dispatch:          # 手动触发
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
 jobs:
   bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350      # 5小时50分钟（接近6小时上限）
+    timeout-minutes: 360
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           pip install aiohttp playwright
-          playwright install --with-deps chromium
+          playwright install --with-deps chromium 2>&1 | tail -5
+          echo "Deps OK"
 
-      - name: Create .env
+      - name: Setup config
         run: |
+          mkdir -p data
+          echo "${{ secrets.GROUP_ID }}" > data/group_id.txt
           cat > .env << 'EOF'
           BOT_APP_ID=${{ secrets.BOT_APP_ID }}
           BOT_SECRET=${{ secrets.BOT_SECRET }}
@@ -32,9 +34,41 @@ jobs:
           OWNER_OPENID=${{ secrets.OWNER_OPENID }}
           DATA_DIR=./data
           EOF
+          echo "Config OK"
 
-      - name: Run QQ Bot
+      - name: Run Bot
         run: |
-          mkdir -p data
-          echo "${{ secrets.GROUP_ID }}" > data/group_id.txt
-          timeout 21000 python3.11 qqbot.py
+          # 后台启动机器人
+          nohup python3.11 qqbot.py > bot.log 2>&1 &
+          BOT_PID=$!
+          echo "Bot PID: $BOT_PID"
+          
+          # 等待初始化（DeepSeek登录 + QQ连接）
+          for i in $(seq 1 15); do
+            sleep 10
+            if grep -q "上线" bot.log 2>/dev/null; then
+              echo "✅ Bot online!"
+              break
+            fi
+            if ! kill -0 $BOT_PID 2>/dev/null; then
+              echo "❌ Bot died during init"
+              tail -30 bot.log
+              exit 1
+            fi
+            echo "Waiting... ${i}0s"
+          done
+          
+          # 持续保活 5h45m
+          END=$((SECONDS + 20700))
+          while [ $SECONDS -lt $END ]; do
+            if ! kill -0 $BOT_PID 2>/dev/null; then
+              echo "⚠️ Bot crashed, restarting..."
+              nohup python3.11 qqbot.py > bot.log 2>&1 &
+              BOT_PID=$!
+              sleep 30
+            fi
+            sleep 60
+          done
+          
+          echo "Job time limit reached, exiting cleanly"
+          kill $BOT_PID 2>/dev/null
