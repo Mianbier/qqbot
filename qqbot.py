@@ -413,7 +413,7 @@ async def chat_with_deepseek_web(user_msg, conv_id):
                 else:
                     await input_elem.press("Enter")
 
-                # === 等待 DeepSeek 输出完全完成 ===
+                # 等待 DeepSeek 输出完全完成（包含深度思考）
                 # 策略1: 等待「停止」按钮出现再消失（表示生成完毕）
                 stop_appeared = False
                 try:
@@ -429,47 +429,34 @@ async def chat_with_deepseek_web(user_msg, conv_id):
                     except:
                         _log.warning("等待停止按钮消失超时，继续提取")
 
-                # 策略2: 等待输入框恢复可用 + 额外延迟确保渲染
+                # 策略2: 等待输入框恢复可用 + 额外延迟确保深度思考渲染
                 try:
                     await _page.wait_for_selector("textarea:not([disabled])", timeout=60000)
                 except:
                     pass
-                await asyncio.sleep(3)  # 额外等待 DOM 完全渲染
+                await asyncio.sleep(5)  # 深度思考答案需要更长时间渲染
 
-                # === 提取完整回复 ===
+                # 滚动到底部确保全部内容已渲染
+                try:
+                    await _page.evaluate("""() => { window.scrollTo(0, document.body.scrollHeight); }""")
+                except: pass
+                await asyncio.sleep(2)
+
+                # === 提取完整回复：跳过思考过程，取最终答案 ===
                 reply = None
 
-                # 方法1: 获取 DeepSeek markdown 渲染区域最后一个的完整文本
+                # 方法1: 优先取 DeepSeek 最终答案容器（不包含思考过程）
                 try:
                     reply = await _page.evaluate("""() => {
-                        // DeepSeek 对话中AI回复的典型容器
-                        const selectors = [
-                            '[class*="ds-markdown"]',
-                            '[class*="ds-markdown--"]',
-                            '.ds-markdown',
-                            '.markdown',
-                            '[class*="message-content"]',
-                            '[class*="response"]',
-                        ];
-                        let containers = [];
-                        for (const sel of selectors) {
-                            containers = document.querySelectorAll(sel);
-                            if (containers.length > 0) break;
+                        // DeepSeek 答案主内容容器
+                        const main = document.querySelector('[class*="ds-assistant-message-main-content"]');
+                        if (main) {
+                            return main.innerText.trim();
                         }
-                        if (containers.length > 0) {
-                            // 取最后一个（最新的AI回复）
-                            const last = containers[containers.length - 1];
-                            return last.innerText || last.textContent || '';
-                        }
-                        // 兜底：找所有带message类的容器
-                        const msgs = document.querySelectorAll('[class*="message"], article');
-                        if (msgs.length > 0) {
-                            // 跳过第一个（用户消息），取后面的
-                            const assistantMsgs = Array.from(msgs)
-                                .filter(m => !m.querySelector('textarea') && m.innerText.length > 10);
-                            if (assistantMsgs.length > 0) {
-                                return assistantMsgs[assistantMsgs.length - 1].innerText;
-                            }
+                        // 兜底：找所有 ds-markdown，取最后一个
+                        const md = document.querySelectorAll('.ds-markdown, [class*="ds-markdown"]');
+                        if (md.length > 0) {
+                            return md[md.length - 1].innerText.trim();
                         }
                         return null;
                     }""")
@@ -478,30 +465,73 @@ async def chat_with_deepseek_web(user_msg, conv_id):
                 except Exception as e:
                     _log.warning("方法1提取失败: %s", e)
 
-                # 方法2: 从整个 main/chat 区域抓取，去掉用户消息部分
-                if not reply or len(reply) < 10:
+                # 方法2: 找到最后一个AI消息，跳过思考过程区块
+                if not reply or len(reply) < 50:
                     try:
-                        chat = await _page.query_selector("main") or await _page.query_selector("[role='main']")
-                        if chat:
-                            full = await chat.inner_text()
-                            # DeepSeek 对话结构：用户消息在前，AI回复在后
-                            # 找到最后一大段非用户消息的文本
-                            # 简单策略：取最后一个「复制」按钮附近的大段文本
-                            parts = full.split('\n\n')
-                            # 过滤掉短行
-                            long_parts = [p.strip() for p in parts if len(p.strip()) > 30]
-                            if long_parts:
-                                reply = long_parts[-1]  # 取最后一段完整长文本
-                                _log.info("方法2提取: %d 字符", len(reply))
-                    except: pass
+                        reply = await _page.evaluate("""() => {
+                            const thinkLabels = ['思考过程', '深度思考', 'Thinking Process', 'Thinking', '已深度思考', '推理过程', 'Thought for', 'Found'];
+                            const selectors = ['[class*="ds-message"]', '[class*="message"]', 'article'];
+                            let messages = [];
+                            for (const sel of selectors) {
+                                messages = document.querySelectorAll(sel);
+                                if (messages.length > 0) break;
+                            }
+                            let lastAssistant = null;
+                            if (messages.length > 0) {
+                                for (let i = messages.length - 1; i >= 0; i--) {
+                                    const m = messages[i];
+                                    if (m.querySelector('textarea')) continue;
+                                    if ((m.innerText || '').length > 10) { lastAssistant = m; break; }
+                                }
+                            }
+                            if (!lastAssistant) return null;
+                            let fullText = lastAssistant.innerText || '';
+                            
+                            // 移除思考过程：从标签开始到"收起"
+                            for (const label of thinkLabels) {
+                                const idx = fullText.indexOf(label);
+                                if (idx >= 0) {
+                                    let cutIdx = fullText.indexOf('收起', idx);
+                                    if (cutIdx > idx && cutIdx < idx + 500) {
+                                        fullText = fullText.substring(0, idx) + fullText.substring(cutIdx + 2);
+                                    } else {
+                                        cutIdx = fullText.indexOf('\n\n', idx);
+                                        if (cutIdx > idx) fullText = fullText.substring(0, idx) + fullText.substring(cutIdx);
+                                    }
+                                }
+                            }
+                            // 如果思考过程在开头（没标签的情况），尝试找到第一个有效格式标记
+                            const markers = ['1.', '一、', '【今日头条】', '【晚间新闻】', '【全国天气】', '🌅', '北京', '中国'];
+                            for (const m of markers) {
+                                const idx = fullText.indexOf(m);
+                                if (idx > 0 && idx < 500) {
+                                    // 前面可能是思考过程，截掉
+                                    if (fullText.substring(0, idx).includes('秒') || fullText.substring(0, idx).includes('web')) {
+                                        fullText = fullText.substring(idx);
+                                        break;
+                                    }
+                                }
+                            }
+                            return fullText.trim();
+                        }""")
+                        if reply:
+                            _log.info("方法2提取: %d 字符", len(reply))
+                    except Exception as e:
+                        _log.warning("方法2提取失败: %s", e)
 
-                # 方法3: 终极兜底——获取 body 中所有长段落
-                if not reply or len(reply) < 10:
+                # 方法3: 兜底——从整个 body 最后几个大段落取，并清理思考过程
+                if not reply or len(reply) < 50:
                     try:
                         body = await _page.inner_text("body")
-                        paragraphs = [p.strip() for p in body.split('\n\n') if len(p.strip()) > 40]
+                        # 移除思考过程标签
+                        for label in ['思考过程', '深度思考', 'Thinking Process', 'Thinking', '已深度思考']:
+                            idx = body.find(label)
+                            if idx >= 0:
+                                cutIdx = body.find('收起', idx)
+                                if cutIdx > idx: body = body[:idx] + '\n' + body[cutIdx+2:]
+                        paragraphs = [p.strip() for p in body.split('\n\n') if len(p.strip()) > 50]
                         if paragraphs:
-                            reply = paragraphs[-1]  # 最后一段长文本
+                            reply = paragraphs[-1]
                             _log.info("方法3提取: %d 字符", len(reply))
                     except: pass
 
@@ -513,6 +543,9 @@ async def chat_with_deepseek_web(user_msg, conv_id):
                     idx = reply.find(user_msg)
                     if idx >= 0:
                         reply = reply[idx + len(user_msg):].strip()
+
+                # 清理多余空行
+                reply = '\n'.join([l for l in reply.split('\n') if l.strip()])
 
                 _log.info("最终回复: %d 字符", len(reply))
 
