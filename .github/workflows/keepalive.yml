@@ -1,0 +1,15 @@
+name: Keep Sandbox Alive
+
+on:
+  schedule:
+    - cron: '*/2 * * * *'  # 每 2 分钟
+  workflow_dispatch:       # 手动触发
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping sandbox
+        run: |
+          curl -s -o /dev/null -w "HTTP %{http_code} | %{time_total}s\n" \
+            "https://webview.e2b.bj6.sandbox.cloudstudio.club/?x-cs-sandbox-id=ca018962234742a485f268e27141769b&x-cs-sandbox-port=8765"
