@@ -1,0 +1,17 @@
+# 敏感文件
+.env
+data/
+
+# Python
+__pycache__/
+*.pyc
+
+# 日志 & 运行时
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
