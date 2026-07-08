@@ -454,15 +454,14 @@ async def chat_with_deepseek_web(user_msg, conv_id):
                 # === 提取完整回复：跳过思考过程，取最终答案 ===
                 reply = None
 
-                # 方法1: 优先取 DeepSeek 最终答案容器（不包含思考过程）
+                # 方法1: 取最后一个 AI 回复（多轮对话时最关键！）
                 try:
                     reply = await _page.evaluate("""() => {
-                        // DeepSeek 答案主内容容器
-                        const main = document.querySelector('[class*="ds-assistant-message-main-content"]');
-                        if (main) {
-                            return main.innerText.trim();
+                        // querySelectorAll 取最后一个，不是第一个！
+                        const mains = document.querySelectorAll('[class*="ds-assistant-message-main-content"]');
+                        if (mains.length > 0) {
+                            return mains[mains.length - 1].innerText.trim();
                         }
-                        // 兜底：找所有 ds-markdown，取最后一个
                         const md = document.querySelectorAll('.ds-markdown, [class*="ds-markdown"]');
                         if (md.length > 0) {
                             return md[md.length - 1].innerText.trim();
@@ -848,6 +847,18 @@ async def handle_dispatch(data):
                 await api_post(f"/v2/users/{uid}/messages", {"content":"尚未绑定群，请在群里@我一次自动绑定。","msg_id":mid})
             return
         
+        if c == "绑定群":
+            # 无参数 -> 看群列表
+            if not known_groups:
+                await api_post(f"/v2/users/{uid}/messages", {"content":"暂无已交互的群。请先在群里@我一次，然后发「绑定群 序号」来切换。","msg_id":mid})
+            else:
+                lines = ["请回复「绑定群 序号」来切换："]
+                for i, (gid_val, info) in enumerate(known_groups.items(), 1):
+                    mark = " ⭐当前" if gid_val == BOUND_GROUP_ID else ""
+                    lines.append(f"{i}. {info.get('name','未知群')} ({gid_val[:12]}...){mark}")
+                await api_post(f"/v2/users/{uid}/messages", {"content":"\n".join(lines),"msg_id":mid})
+            return
+        
         if c.startswith("绑定群 "):
             arg = c[4:].strip()
             gid_new = ""
@@ -895,11 +906,14 @@ async def handle_dispatch(data):
             else: await api_post(f"/v2/users/{uid}/messages", {"content":"暂无提醒，发送「提醒 15:30 开会」来设置。","msg_id":mid})
             return
         if c.startswith("群发 "):
-            msg = c[5:].strip()
+            _log.info("[群发命令] uid=%s msg=%s", uid[:10], c)
+            msg = c[3:].strip()  # "群发 " 是3字符
             gid = BOUND_GROUP_ID or os.getenv("LAST_GROUP_ID","")
+            _log.info("[群发命令] target=%s content=%s", gid[:20], msg[:50])
             if not gid:
                 await api_post(f"/v2/users/{uid}/messages", {"content":"还没有绑定群，请先在群里@我一次，再用「绑定群」命令选择。","msg_id":mid}); return
-            await api_post(f"/v2/groups/{gid}/messages", {"content":msg,"msg_id":""})
+            result = await api_post(f"/v2/groups/{gid}/messages", {"content":msg,"msg_id":""})
+            _log.info("[群发命令] API结果: %s", result[:100])
             gname = known_groups.get(gid, {}).get('name', gid[:12])
             await api_post(f"/v2/users/{uid}/messages", {"content":f"已发送到 {gname}：{msg}","msg_id":mid}); return
 
@@ -926,12 +940,7 @@ async def handle_dispatch(data):
         os.environ["LAST_GROUP_ID"] = gid
         global _target_group_id
         _target_group_id = gid  # 记录最后一次交互的群
-        if not BOUND_GROUP_ID:
-            BOUND_GROUP_ID = gid
-            _log.info("自动绑定群ID: %s", gid)
-            try:
-                with open(GROUP_ID_FILE, "w") as f: f.write(gid)
-            except: pass
+        # 注：绑定群只能在私聊中用「绑定群」命令修改，不会自动覆盖
         
         # 记录群信息
         known_groups[gid] = {"name": name or "未知", "last_at": time.time()}
@@ -940,8 +949,15 @@ async def handle_dispatch(data):
         except: pass
 
         if c in ["帮助","菜单","功能","?"]:
-            menu = "群聊命令（@我）：\n运势 | 塔罗牌 | 笑话 | 猜数字\n发图 关键词 | 评价/吐槽 xxx\n成语接龙 | 结束接龙 | 故事接龙 | 结束故事"
+            menu = "群聊命令（@我）：\n运势 | 塔罗牌 | 笑话 | 猜数字\n发图 关键词 | 评价/吐槽 xxx\n成语接龙 | 结束接龙 | 故事接龙 | 结束故事\n群发 内容 | 群列表 | 查询群"
             await api_post(f"/v2/groups/{gid}/messages", {"content":menu,"msg_id":mid}); return
+        
+        # 群发（群聊中@机器人也可以群发）
+        if c.startswith("群发 "):
+            msg = c[3:].strip()  # "群发 " 是3字符
+            target = BOUND_GROUP_ID or gid
+            await api_post(f"/v2/groups/{target}/messages", {"content":msg,"msg_id":""})
+            await api_post(f"/v2/groups/{gid}/messages", {"content":f"✅ 已群发到绑定群", "msg_id":mid}); return
         if c in ["抽签","运势","运气"]:
             await api_post(f"/v2/groups/{gid}/messages", {"content":f"@{name} {fortune()}","msg_id":mid}); return
         if c in ["塔罗牌","占卜"]:
