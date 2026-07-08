@@ -2,14 +2,19 @@ name: Keep Sandbox Alive
 
 on:
   schedule:
-    - cron: '*/2 * * * *'  # 每 2 分钟
-  workflow_dispatch:       # 手动触发
+    - cron: '*/5 * * * *'     # 每 5 分钟
+  workflow_dispatch:
 
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Ping sandbox
+      - name: Ping sandbox (每 30 秒 × 10 次)
         run: |
-          curl -s -o /dev/null -w "HTTP %{http_code} | %{time_total}s\n" \
-            "https://webview.e2b.bj6.sandbox.cloudstudio.club/?x-cs-sandbox-id=ca018962234742a485f268e27141769b&x-cs-sandbox-port=8765"
+          for i in $(seq 1 10); do
+            RESULT=$(curl -s -o /dev/null -w "HTTP %{http_code} | %{time_total}s" \
+              "https://webview.e2b.bj6.sandbox.cloudstudio.club/?x-cs-sandbox-id=ca018962234742a485f268e27141769b&x-cs-sandbox-port=8765")
+            echo "[$(date +%H:%M:%S)] ping #$i: $RESULT"
+            [ $i -lt 10 ] && sleep 30
+          done
