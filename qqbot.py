@@ -30,6 +30,7 @@ STORAGE_STATE_FILE = os.path.join(DATA_DIR, "deepseek_state.json")
 USAGE_FILE = os.path.join(DATA_DIR, "usage.json")
 CHAT_LOG_FILE = os.path.join(DATA_DIR, "chat_history.json")
 GROUP_ID_FILE = os.path.join(DATA_DIR, "group_id.txt")
+GROUPS_LOG = os.path.join(DATA_DIR, "groups.json")
 
 # ---------- 全局变量 ----------
 _usage = {"total_tokens": 0, "total_cost": 0.0, "calls": 0, "daily": {}}
@@ -65,6 +66,14 @@ _story_mode = {}
 _used_chengyu = {}
 _target_group_id = ""        # 最后一次交互的群（动态）
 _last_50min_time = time.time()
+TIMED_TASKS_ON = True         # 定时任务开关
+
+# 已交互群列表
+known_groups = {}
+if os.path.exists(GROUPS_LOG):
+    try:
+        with open(GROUPS_LOG) as f: known_groups = json.load(f)
+    except: pass
 
 # 绑定群：定时任务和群发只对这个群生效（从文件读取，不变）
 BOUND_GROUP_ID = ""
@@ -766,6 +775,7 @@ async def handle_dispatch(data):
         name = d.get("author",{}).get("username","")
         c = d.get("content","").strip()
         mid = d.get("id","")
+        global _auto_chat, BOUND_GROUP_ID, TIMED_TASKS_ON
         if not OWNER_OPENID:
             os.environ["OWNER_OPENID"] = uid
             try:
@@ -806,8 +816,74 @@ async def handle_dispatch(data):
             reply = await chat_with_ai("_eval",f"用毒舌但不带恶意的语气，搞笑评价「{target}」，不超过两句话。","")
             await api_post(f"/v2/users/{uid}/messages", {"content":reply,"msg_id":mid}); return
         if c in ["帮助","功能","菜单","help"]:
-            menu = "私聊命令：\n翻译 xxx | 运势 | 塔罗牌 | 笑话 | 发图 关键词\n提醒 15:30 喝水 | 提醒 30分钟 休息\n我的提醒 | 用量 | 群发 内容 | 关闭插话 / 开启插话"
+            menu = ("私聊命令：\n"
+                    "📋 群管理：群列表 | 绑定群 | 查询群\n"
+                    "⏰ 定时：定时开关 | 定时状态\n"
+                    "📢 群发 内容 | 翻译 xxx | 运势 | 塔罗牌\n"
+                    "😄 笑话 | 发图 关键词\n"
+                    "⏰ 提醒 15:30 喝水 | 提醒 30分钟 休息\n"
+                    "📊 用量 | 我的提醒")
             await api_post(f"/v2/users/{uid}/messages", {"content":menu,"msg_id":mid}); return
+        
+        # --- 群管理命令 ---
+        if c == "群列表":
+            if not known_groups:
+                await api_post(f"/v2/users/{uid}/messages", {"content":"暂无已交互的群，请在群里@我一次。","msg_id":mid})
+            else:
+                lines = ["📋 已交互群列表："]
+                for i, (gid_val, info) in enumerate(known_groups.items(), 1):
+                    mark = " ⭐当前绑定" if gid_val == BOUND_GROUP_ID else ""
+                    lines.append(f"{i}. {info.get('name','未知群')} ({gid_val[:12]}...){mark}")
+                lines.append("\n回复 绑定群 序号 来切换绑定群")
+                await api_post(f"/v2/users/{uid}/messages", {"content":"\n".join(lines),"msg_id":mid})
+            return
+        
+        if c == "查询群":
+            if BOUND_GROUP_ID and BOUND_GROUP_ID in known_groups:
+                info = known_groups[BOUND_GROUP_ID]
+                await api_post(f"/v2/users/{uid}/messages", {"content":f"⭐ 当前绑定群：{info.get('name','未知')}\nID: {BOUND_GROUP_ID}\n定时任务：{'✅ 开启' if TIMED_TASKS_ON else '❌ 关闭'}","msg_id":mid})
+            elif BOUND_GROUP_ID:
+                await api_post(f"/v2/users/{uid}/messages", {"content":f"⭐ 当前绑定群ID: {BOUND_GROUP_ID}\n定时任务：{'✅ 开启' if TIMED_TASKS_ON else '❌ 关闭'}","msg_id":mid})
+            else:
+                await api_post(f"/v2/users/{uid}/messages", {"content":"尚未绑定群，请在群里@我一次自动绑定。","msg_id":mid})
+            return
+        
+        if c.startswith("绑定群 "):
+            arg = c[4:].strip()
+            gid_new = ""
+            if arg.isdigit():
+                # 按序号
+                idx = int(arg) - 1
+                gids = list(known_groups.keys())
+                if 0 <= idx < len(gids):
+                    gid_new = gids[idx]
+            else:
+                # 直接给 ID
+                gid_new = arg
+            if gid_new:
+                BOUND_GROUP_ID = gid_new
+                try:
+                    with open(GROUP_ID_FILE, "w") as f: f.write(gid_new)
+                except: pass
+                info = known_groups.get(gid_new, {})
+                name = info.get('name', gid_new[:12])
+                await api_post(f"/v2/users/{uid}/messages", {"content":f"✅ 已切换绑定群：{name}","msg_id":mid})
+            else:
+                await api_post(f"/v2/users/{uid}/messages", {"content":"未找到该群。请先发「群列表」查看。","msg_id":mid})
+            return
+        
+        # --- 定时任务开关 ---
+        if c == "定时开关":
+            TIMED_TASKS_ON = not TIMED_TASKS_ON
+            status = "✅ 开启" if TIMED_TASKS_ON else "❌ 关闭"
+            await api_post(f"/v2/users/{uid}/messages", {"content":f"定时任务已{status}\n（早报、晚报、趣味消息）","msg_id":mid})
+            return
+        
+        if c == "定时状态":
+            status = "✅ 已开启" if TIMED_TASKS_ON else "❌ 已关闭"
+            gname = known_groups.get(BOUND_GROUP_ID, {}).get('name', '未绑定') if BOUND_GROUP_ID else '未绑定'
+            await api_post(f"/v2/users/{uid}/messages", {"content":f"⏰ 定时任务状态\n\n开关：{status}\n绑定群：{gname}\n\n早报 6:00\n晚报 18:00\n趣味消息 每50分钟\n用量报告 22:00（仅私聊）","msg_id":mid})
+            return
         if c.startswith("提醒"):
             result = await add_reminder(c,uid)
             await api_post(f"/v2/users/{uid}/messages", {"content":result,"msg_id":mid}); return
@@ -820,11 +896,12 @@ async def handle_dispatch(data):
             return
         if c.startswith("群发 "):
             msg = c[5:].strip()
-            gid = os.getenv("LAST_GROUP_ID","")
+            gid = BOUND_GROUP_ID or os.getenv("LAST_GROUP_ID","")
             if not gid:
-                await api_post(f"/v2/users/{uid}/messages", {"content":"还没有群ID，请先在群里@我一次。","msg_id":mid}); return
+                await api_post(f"/v2/users/{uid}/messages", {"content":"还没有绑定群，请先在群里@我一次，再用「绑定群」命令选择。","msg_id":mid}); return
             await api_post(f"/v2/groups/{gid}/messages", {"content":msg,"msg_id":""})
-            await api_post(f"/v2/users/{uid}/messages", {"content":f"已发送到群：{msg}","msg_id":mid}); return
+            gname = known_groups.get(gid, {}).get('name', gid[:12])
+            await api_post(f"/v2/users/{uid}/messages", {"content":f"已发送到 {gname}：{msg}","msg_id":mid}); return
 
         _log.info("[私聊] %s", c[:60])
         reply = await chat_with_ai(uid, c, name)
@@ -847,15 +924,20 @@ async def handle_dispatch(data):
         mid = d.get("id","")
         conv_id = f"group_{gid}"
         os.environ["LAST_GROUP_ID"] = gid
-        global _target_group_id, BOUND_GROUP_ID
+        global _target_group_id
         _target_group_id = gid  # 记录最后一次交互的群
         if not BOUND_GROUP_ID:
-            # 没有绑定群时才用第一个@的群作为绑定群
             BOUND_GROUP_ID = gid
             _log.info("自动绑定群ID: %s", gid)
             try:
                 with open(GROUP_ID_FILE, "w") as f: f.write(gid)
             except: pass
+        
+        # 记录群信息
+        known_groups[gid] = {"name": name or "未知", "last_at": time.time()}
+        try:
+            with open(GROUPS_LOG, "w") as f: json.dump(known_groups, f, ensure_ascii=False)
+        except: pass
 
         if c in ["帮助","菜单","功能","?"]:
             menu = "群聊命令（@我）：\n运势 | 塔罗牌 | 笑话 | 猜数字\n发图 关键词 | 评价/吐槽 xxx\n成语接龙 | 结束接龙 | 故事接龙 | 结束故事"
@@ -953,6 +1035,8 @@ async def daily_report_loop():
         today = now.strftime("%Y-%m-%d")
         gid = BOUND_GROUP_ID or os.getenv("LAST_GROUP_ID","")
 
+        # 提醒始终执行（不受定时开关影响）
+
         # 提醒
         triggered = check_reminders()
         for r in triggered:
@@ -961,7 +1045,7 @@ async def daily_report_loop():
             except: pass
 
         # 早报 6:00
-        if now.hour == 6 and _last_morning_date != today and gid:
+        if TIMED_TASKS_ON and now.hour == 6 and _last_morning_date != today and gid:
             _last_morning_date = today
             _log.info("生成早报...")
             report = await generate_morning_report()
@@ -977,7 +1061,7 @@ async def daily_report_loop():
                 await api_post(f"/v2/users/{OWNER_OPENID}/messages", {"content":f"早报已生成\n{report[:500]}..."})
 
         # 晚报 18:00
-        if now.hour == 18 and _last_evening_date != today and gid:
+        if TIMED_TASKS_ON and now.hour == 18 and _last_evening_date != today and gid:
             _last_evening_date = today
             _log.info("生成晚报...")
             morning_titles = list(_morning_news_titles) if _morning_news_titles else []
@@ -988,7 +1072,7 @@ async def daily_report_loop():
                 await api_post(f"/v2/users/{OWNER_OPENID}/messages", {"content":f"晚报已生成\n{report[:500]}..."})
 
         # 每50分钟趣味消息
-        if gid and (time.time() - _last_50min_time >= 50*60):
+        if TIMED_TASKS_ON and gid and (time.time() - _last_50min_time >= 50*60):
             _last_50min_time = time.time()
             _log.info("生成趣味消息...")
             fun_msg = await generate_random_fun()
