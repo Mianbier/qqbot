@@ -1,0 +1,19 @@
+services:
+  - type: worker
+    name: qqbot
+    env: python
+    buildCommand: pip install -r requirements.txt && playwright install --with-deps chromium
+    startCommand: python3.11 qqbot.py
+    envVars:
+      - key: BOT_APP_ID
+        sync: false
+      - key: BOT_SECRET
+        sync: false
+      - key: DS_PHONE
+        sync: false
+      - key: DS_PASSWORD
+        sync: false
+      - key: OWNER_OPENID
+        sync: false
+      - key: DATA_DIR
+        value: /opt/render/project/data
