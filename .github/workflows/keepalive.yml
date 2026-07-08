@@ -1,0 +1,21 @@
+name: Keep Sandbox Alive
+
+on:
+  schedule:
+    - cron: '*/3 * * * *'   # 每 3 分钟
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping sandbox health endpoint
+        run: |
+          for i in $(seq 1 3); do
+            CODE=$(curl -sL -c /tmp/c.txt -b /tmp/c.txt -o /dev/null -w "%{http_code}" \
+              "https://webview.e2b.bj6.sandbox.cloudstudio.club/?x-cs-sandbox-id=ca018962234742a485f268e27141769b&x-cs-sandbox-port=8765")
+            echo "[$(date +%H:%M:%S)] ping #$i: HTTP $CODE"
+            [ "$CODE" = "200" ] && echo "OK" && break
+            [ $i -lt 3 ] && sleep 10
+          done
